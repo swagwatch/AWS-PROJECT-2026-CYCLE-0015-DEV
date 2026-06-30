@@ -1,0 +1,67 @@
+name: (DEV) AWS ecs OPA Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'modules/**'
+      - '.github/workflows/**'
+
+jobs:
+  terraform-implementation-validation:
+    name: Terraform Implementation Validation
+    runs-on: ubuntu-latest
+
+    env:
+      WORKSPACE: 'dev'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup OPA
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: latest
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.4"
+      
+      - name: Build Terraform files and OPA policies
+        run: |
+          cd environments/$WORKSPACE/.onekloud_init
+          make
+        continue-on-error: false
+
+      - name: Terraform Init
+        id: init
+        run: |
+          cd environments/$WORKSPACE
+          terraform init -backend=false
+        continue-on-error: false
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd environments/$WORKSPACE
+          terraform validate
+        continue-on-error: false
+      
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd environments/$WORKSPACE
+          terraform plan -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+        continue-on-error: false
+      
+      - name: OPA Policy Check
+        id: policy-check
+        run: |
+          cd environments/$WORKSPACE
+          opa eval -d opa-policies/service_ecs_policies.rego -i tfplan.json --fail "count(data.terraform.aws.ecs.deny) > 0"
+        continue-on-error: false
