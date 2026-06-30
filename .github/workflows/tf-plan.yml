@@ -1,0 +1,111 @@
+name: terraform-plan
+
+on: pull_request
+
+
+
+jobs:
+
+  terraform-plan-dev:
+    
+    name: terraform-plan-dev
+    runs-on: ubuntu-latest
+
+    env:
+      WORKSPACE: 'dev'
+      AWS_REGION: 'us-east-1'
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_K_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S_ID }}
+      # CHECKOV_API_KEY: ${{ secrets.CHECKOV_API_KEY }}
+    
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build Workspace / Environment
+        id: build-environment
+        run: |
+          cd environments/$WORKSPACE/.onekloud_init
+          make
+          ls -la ../
+          cat ../terraform.tfvars
+      
+      - name: Setup AWSCli
+        id: install-aws-cli
+        uses: unfor19/install-aws-cli-action@v1.0.6
+        with:
+          version: 2     # default
+          verbose: false # default
+          arch: amd64    # allowed values: amd64, arm64
+      
+      - name: Setup Terraform
+        id: terraform-setup
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.4
+          terraform_wrapper: false
+      
+      - name: terraform init
+        id: terraform-init
+        run: terraform -chdir=environments/$WORKSPACE init
+      
+      - name: terraform format
+        id: terraform-format
+        run: terraform -chdir=environments/$WORKSPACE fmt -check -diff
+      
+      - name: terraform validate
+        id: terraform-validate
+        run: terraform -chdir=environments/$WORKSPACE validate
+      
+      - name: terraform plan
+        id: terraform-plan
+        run: |
+          set -eu
+          cat environments/$WORKSPACE/terraform.tfvars
+          terraform -chdir=environments/$WORKSPACE plan
+          terraform_plan_out=$(terraform -chdir=environments/$WORKSPACE plan -out tfplan.binary)
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "tf_plan_out<<$EOF" >> $GITHUB_OUTPUT
+          echo "$terraform_plan_out" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+      
+      - name: Convert Terraform Plan To JSON
+        id: terraform-json
+        run: terraform -chdir=environments/$WORKSPACE show -json tfplan.binary | jq -r '.' > tfplan.json
+      
+      - name: Setup OPA
+        id: setup-opa
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: latest
+      
+      - name: Validate Terraform Plan Against OPA GENERAL [ WARN ] rules
+        id: validate-opa-warn
+        run: opa exec --bundle environments/$WORKSPACE/opa-policies --decision general/warn tfplan.json | jq -r '.result[0].result'
+      
+      - name: Validate Terraform Plan Against OPA GENERAL [ DENY ] rules
+        id: validate-opa-deny
+        run: |
+          opa exec --bundle environments/$WORKSPACE/opa-policies --decision general/deny tfplan.json | jq -r '.result[0].result'
+          has_failures=$(opa exec --bundle environments/$WORKSPACE/opa-policies --decision general/deny tfplan.json | jq -r '.result[0].result[0]')
+          if [[ $has_failures == *"GENERAL"* ]]
+          then
+             exit 1
+          fi
+      
+      - name: Install PIP3
+        id: install-pip3
+        run: |
+          sudo apt-get -y install python3-pip
+      
+      - name: Install Checkov
+        id: install-checkov
+        run: pip3 install checkov
+      
+      - name: Static Code Security Analysis
+        id: run-checkov
+        run: checkov -f tfplan.json -s --quiet # --bc-api-key $CHECKOV_API_KEY

@@ -1,0 +1,109 @@
+name: terraform-destroy
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+
+  terraform-destroy-dev:
+    # Only run for comments starting with "terraform destory dev" in a pull request.
+    if: >
+      startsWith(github.event.comment.body, 'terraform destroy dev')
+      && startsWith(github.event.issue.pull_request.url, 'https://')
+  
+    name: terraform-destroy-dev
+    runs-on: ubuntu-latest
+
+    env:
+      WORKSPACE: 'dev'
+      AWS_REGION: 'us-east-1'
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_K_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S_ID }}
+    
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 'Load PR Details'
+        id: load-pr
+        run: |
+          set -eu
+          echo ${{ github.event.issue.pull_request.url }}
+          echo ${{ secrets.CROSS_REPO_TOKEN }}
+          resp=$(curl -sSf \
+            --url ${{ github.event.issue.pull_request.url }} \
+            --header 'Authorization: Bearer ${{ secrets.CROSS_REPO_TOKEN }}' \
+            --header 'Accept: application/vnd.github+json')
+          sha=$(jq -r '.head.sha' <<< "$resp")
+          echo "head_sha=$sha" >> $GITHUB_OUTPUT
+          comments_url=$(jq -r '.comments_url' <<< "$resp")
+          echo "comments_url=$comments_url" >> $GITHUB_OUTPUT
+      
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # By default (in a non-pull request build) you get HEAD of 'master'
+          ref: ${{ steps.load-pr.outputs.head_sha }}
+          submodules: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }} # Needed for private submodules
+      
+      - name: Build Workspace / Environment
+        id: build-environment
+        run: |
+          cd environments/$WORKSPACE/.onekloud_init
+          make
+          ls -la ../
+          cat ../terraform.tfvars
+
+      - name: Setup AWSCli
+        id: install-aws-cli
+        uses: unfor19/install-aws-cli-action@v1.0.6
+        with:
+          version: 2     # default
+          verbose: false # default
+          arch: amd64    # allowed values: amd64, arm64
+      
+      - name: Setup Terraform
+        id: terraform-setup
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.4
+          terraform_wrapper: false
+      
+      - name: terraform init
+        id: terraform-init
+        run: terraform -chdir=environments/$WORKSPACE init
+      
+      - name: terraform format
+        id: terraform-format
+        run: terraform -chdir=environments/$WORKSPACE fmt -check -diff
+      
+      - name: terraform validate
+        id: terraform-validate
+        run: terraform -chdir=environments/$WORKSPACE validate
+      
+      - name: terraform plan
+        id: terraform-plan
+        run: |
+          set -eu
+          terraform -chdir=environments/$WORKSPACE plan
+          terraform_plan_out=$(terraform -chdir=environments/$WORKSPACE plan -no-color -out tfplan.binary)
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "tf_plan_out<<$EOF" >> $GITHUB_OUTPUT
+          echo "$terraform_plan_out" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT 
+      
+      - name: terraform destroy
+        id: terraform-destroy
+        run: |
+          set -eu
+          terraform_apply_out=$(terraform -chdir=environments/$WORKSPACE destroy -auto-approve)
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "tf_apply_out<<$EOF" >> $GITHUB_OUTPUT
+          echo "$terraform_apply_out" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
